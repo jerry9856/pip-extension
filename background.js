@@ -129,6 +129,9 @@ function togglePip() {
 
     // 把影片搬進子母畫面，關掉自訂前的原生控制列（用我們自己的）
     video.controls = false;
+    // 直接寫進 inline style，蓋掉原網站可能留下的固定寬高（否則拖曳邊角時影片不會跟著縮放）
+    video.style.cssText =
+      "width:100%;height:100%;max-width:none;max-height:none;object-fit:contain;display:block;background:#000;";
     wrap.appendChild(video);
 
     // 控制列

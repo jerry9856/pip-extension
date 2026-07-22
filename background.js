@@ -102,12 +102,16 @@ function togglePip() {
         font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif;}
       .pip-wrap{position:relative;width:100%;height:100%;background:#000;}
       .pip-wrap video{width:100%;height:100%;object-fit:contain;background:#000;}
-      .pip-bar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;
-        gap:6px;padding:10px 12px;
+      .pip-bar{position:absolute;left:0;right:0;bottom:0;display:flex;flex-direction:column;
+        gap:8px;padding:10px 12px;
         background:linear-gradient(to top, rgba(0,0,0,.78), rgba(0,0,0,0));
         opacity:0;transform:translateY(8px);pointer-events:none;
         transition:opacity .18s ease, transform .18s ease;}
       body.pip-show .pip-bar{opacity:1;transform:none;pointer-events:auto;}
+      .pip-row{display:flex;align-items:center;gap:8px;width:100%;}
+      .pip-time{color:#fff;font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;
+        min-width:40px;text-align:center;flex:none;}
+      .pip-seek{flex:1;height:16px;margin:0;cursor:pointer;accent-color:#fff;}
       .pip-bar button{cursor:pointer;border:none;color:#fff;background:rgba(255,255,255,.15);
         border-radius:9px;height:36px;min-width:36px;padding:0 10px;font-size:14px;font-weight:600;
         line-height:1;display:inline-flex;align-items:center;justify-content:center;
@@ -138,6 +142,33 @@ function togglePip() {
     const bar = pdoc.createElement("div");
     bar.className = "pip-bar";
 
+    // 進度條列：目前時間 / 進度條 / 總時間
+    const seekRow = pdoc.createElement("div");
+    seekRow.className = "pip-row";
+
+    const timeCur = pdoc.createElement("span");
+    timeCur.className = "pip-time";
+    timeCur.textContent = "0:00";
+
+    const seek = pdoc.createElement("input");
+    seek.className = "pip-seek";
+    seek.type = "range";
+    seek.min = "0";
+    seek.max = "1000";
+    seek.step = "1";
+    seek.value = "0";
+    seek.title = "拖曳調整播放進度";
+
+    const timeDur = pdoc.createElement("span");
+    timeDur.className = "pip-time";
+    timeDur.textContent = "0:00";
+
+    seekRow.append(timeCur, seek, timeDur);
+
+    // 按鈕列
+    const ctrlRow = pdoc.createElement("div");
+    ctrlRow.className = "pip-row";
+
     const btnBack = pdoc.createElement("button");
     btnBack.textContent = "«10";
     btnBack.title = "後退 10 秒";
@@ -163,12 +194,57 @@ function togglePip() {
     });
     speed.value = String(video.playbackRate || 1);
 
-    bar.append(btnBack, btnPlay, btnFwd, spacer, speed);
+    ctrlRow.append(btnBack, btnPlay, btnFwd, spacer, speed);
+    bar.append(seekRow, ctrlRow);
     wrap.appendChild(bar);
 
     // ---- 行為 ----
     const syncPlayIcon = () => { btnPlay.textContent = video.paused ? "▶" : "⏸"; };
     syncPlayIcon();
+
+    // 進度條：把 0~1000 對應到 0~duration，直播/未知長度時停用
+    const fmt = (s) => {
+      if (!isFinite(s) || s < 0) return "0:00";
+      s = Math.floor(s);
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const sec = String(s % 60).padStart(2, "0");
+      return h > 0 ? h + ":" + String(m).padStart(2, "0") + ":" + sec : m + ":" + sec;
+    };
+    let dragging = false;
+    let wasPlaying = false;
+    const seekable = () => isFinite(video.duration) && video.duration > 0;
+    const syncSeek = () => {
+      timeDur.textContent = seekable() ? fmt(video.duration) : "直播";
+      seek.disabled = !seekable();
+      if (dragging || !seekable()) return;
+      seek.value = String(Math.round((video.currentTime / video.duration) * 1000));
+      timeCur.textContent = fmt(video.currentTime);
+    };
+    const seekToSlider = () => {
+      if (!seekable()) return;
+      const t = (parseFloat(seek.value) / 1000) * video.duration;
+      timeCur.textContent = fmt(t);
+      video.currentTime = t;
+    };
+    seek.addEventListener("pointerdown", () => {
+      dragging = true;
+      wasPlaying = !video.paused;
+      if (wasPlaying) video.pause(); // 拖曳時暫停，畫面才會即時停在拖到的位置
+    });
+    seek.addEventListener("input", seekToSlider);
+    const endDrag = () => {
+      seekToSlider();
+      dragging = false;
+      if (wasPlaying) { wasPlaying = false; video.play().catch(() => {}); }
+    };
+    seek.addEventListener("change", endDrag);
+    seek.addEventListener("pointerup", endDrag);
+    seek.addEventListener("pointercancel", endDrag);
+    video.addEventListener("timeupdate", syncSeek);
+    video.addEventListener("durationchange", syncSeek);
+    video.addEventListener("loadedmetadata", syncSeek);
+    syncSeek();
 
     btnPlay.addEventListener("click", () => {
       if (video.paused) video.play().catch(() => {});

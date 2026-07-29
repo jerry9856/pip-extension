@@ -124,6 +124,12 @@ function togglePip() {
         color:#fff;font-size:13px;font-weight:600;padding:0 8px;cursor:pointer;}
       .pip-bar select:hover{background:rgba(255,255,255,.30);}
       .pip-bar select option{color:#000;}
+      .pip-subs{position:absolute;left:4%;right:4%;bottom:6%;display:none;
+        text-align:center;pointer-events:none;white-space:pre-line;
+        color:#fff;font-size:clamp(13px, 5.2vh, 40px);font-weight:600;line-height:1.35;
+        text-shadow:0 0 4px #000,0 1px 2px #000,0 0 8px rgba(0,0,0,.85);
+        transition:bottom .18s ease;}
+      body.pip-show .pip-subs{bottom:106px;}
     `;
     pdoc.head.appendChild(style);
 
@@ -137,6 +143,9 @@ function togglePip() {
     video.style.cssText =
       "width:100%;height:100%;max-width:none;max-height:none;object-fit:contain;display:block;background:#000;";
     wrap.appendChild(video);
+
+    // Netflix 等網站的字幕是疊在影片上的 HTML，搬走影片後會留在原頁面，這裡把它鏡射進浮窗
+    setupSubtitleMirror(pdoc, wrap, pipWindow);
 
     // 控制列
     const bar = pdoc.createElement("div");
@@ -291,6 +300,66 @@ function togglePip() {
         placeholder.parentNode.insertBefore(video, placeholder);
       }
       placeholder.remove();
+    }, { once: true });
+  }
+
+  // ---- 字幕鏡射 ----
+  // 有些網站的字幕不在影片串流裡，而是用 HTML 疊在 <video> 上（Netflix、YouTube 等）。
+  // 影片被搬進浮窗後，網站的播放器仍會持續更新原頁面上的字幕節點，
+  // 所以只要監聽那個節點，把文字同步到浮窗裡的字幕層即可。
+  function setupSubtitleMirror(pdoc, wrap, pipWindow) {
+    const SUB_SELECTORS = [
+      ".player-timedtext",             // Netflix
+      ".ytp-caption-window-container", // YouTube
+      ".shaka-text-container",         // Shaka Player（不少自架播放器）
+    ];
+
+    const subs = pdoc.createElement("div");
+    subs.className = "pip-subs";
+    wrap.appendChild(subs);
+
+    let observer = null;
+    let source = null;
+
+    const findSource = () => {
+      for (const sel of SUB_SELECTORS) {
+        const el = document.querySelector(sel);
+        if (el) return el;
+      }
+      return null;
+    };
+
+    const render = () => {
+      const text = source ? (source.innerText || "").trim() : "";
+      if (text) {
+        subs.textContent = text;
+        subs.style.display = "block";
+      } else {
+        subs.style.display = "none";
+      }
+    };
+
+    const attach = () => {
+      const el = findSource();
+      if (el === source) return;
+      if (observer) observer.disconnect();
+      source = el;
+      if (!source) {
+        render();
+        return;
+      }
+      observer = new MutationObserver(render);
+      observer.observe(source, { subtree: true, childList: true, characterData: true });
+      render();
+    };
+
+    attach();
+    // 字幕容器可能被網站砍掉重建（換集、切換字幕語言），定期確認有掛在對的節點上
+    const rebindTimer = setInterval(attach, 1000);
+
+    pipWindow.addEventListener("pagehide", () => {
+      clearInterval(rebindTimer);
+      if (observer) observer.disconnect();
     }, { once: true });
   }
 

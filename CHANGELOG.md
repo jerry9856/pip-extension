@@ -4,6 +4,11 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，並遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [1.3.0] - 2026-07-29
+
+### 修正
+- 修正 Netflix（及 YouTube、Shaka Player 網站）開啟子母畫面後，字幕留在原視窗不會顯示在浮窗上的問題。做法是監聽原頁面的字幕節點，把文字即時鏡射到浮窗內的字幕層。
+
 ## [1.2.0] - 2026-07-17
 
 ### 新增

@@ -4,6 +4,18 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，並遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [1.4.0] - 2026-09-22
+
+### 新增
+- 支援把放在**同網域 iframe** 裡的播放器（friDay 影音等）開成子母畫面。friDay 的播放器是嵌在詳細頁裡的 iframe：Document PiP 只允許最上層框架開啟，而 `<video>` 一旦從 iframe 搬到別的文件就會被 Chrome 整個重置（MSE／DRM 串流中斷，已實測），所以先前在這類網站只能退回沒有字幕的原生子母畫面。現在改為由最上層框架把**整個 iframe 搬進浮窗**，網站自己的播放器、字幕與控制列原封不動在浮窗裡運作。
+  - 代價是 iframe 搬移時會重新載入一次（關閉浮窗搬回原頁面時也是），擴充套件會記住播放位置並在播放器起來後自動接續。
+  - 播放器對上層發的 `postMessage`（friDay 用來切換下一集、播完處理）會轉送回原頁面，換集流程照常運作。
+  - 這種模式下浮窗顯示的是網站自己的控制列，不是本套件的自訂控制列。
+
+### 修正
+- 字幕鏡射來源加入 VisualOn 播放器的 `.vop-caption-container`（`#TTMLRenderingDiv`），並補上 Video.js、JW Player、Bitmovin、Plyr 的字幕容器；改為從影片原本的位置往上找同一個播放器的字幕容器，避免頁面上有多個播放器時抓錯。
+- 關閉原生子母畫面時，也會找同網域 iframe 裡正在子母畫面的影片。
+
 ## [1.3.3] - 2026-07-29
 
 ### 修正

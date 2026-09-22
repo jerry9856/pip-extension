@@ -33,20 +33,31 @@ chrome.commands.onCommand.addListener((command) => {
 // 這個函式會被序列化後注入到每個 frame 執行（所有依賴都寫在函式內部）
 function togglePip() {
   const dpip = window.documentPictureInPicture;
+  const isTop = window === window.top;
+
+  // 同網域 iframe 裡的影片統一交給上層框架處理：上層看得到這裡的 <video>，
+  // 而且 Document PiP 只能由最上層框架開啟。跨網域 iframe 上層看不到，才自己處理。
+  if (!isTop) {
+    try {
+      if (window.parent.document) return;
+    } catch (e) {}
+  }
 
   // 已經開著自訂子母畫面 → 關掉它
   if (dpip && dpip.window && !dpip.window.closed) {
     dpip.window.close();
     return;
   }
-  // 已經開著原生子母畫面 → 關掉它
-  if (document.pictureInPictureElement) {
-    document.exitPictureInPicture().catch(() => {});
+  // 已經開著原生子母畫面（含同網域 iframe 裡的影片）→ 關掉它
+  const pipDoc = findNativePipDoc(document, 0);
+  if (pipDoc) {
+    pipDoc.exitPictureInPicture().catch(() => {});
     return;
   }
 
-  const videos = Array.from(document.querySelectorAll("video"));
-  if (videos.length === 0) return;
+  // 收集本文件與同網域 iframe 裡的影片（friDay 影音等網站把播放器放在 iframe）
+  const found = collectVideos();
+  if (found.length === 0) return;
 
   const area = (v) => {
     const r = v.getBoundingClientRect();
@@ -54,15 +65,17 @@ function togglePip() {
   };
 
   // 排序：正在播放優先，其次畫面最大
-  videos.sort((a, b) => {
-    const playA = a.paused ? 0 : 1;
-    const playB = b.paused ? 0 : 1;
+  found.sort((a, b) => {
+    const playA = a.video.paused ? 0 : 1;
+    const playB = b.video.paused ? 0 : 1;
     if (playA !== playB) return playB - playA;
-    return area(b) - area(a);
+    return area(b.video) - area(a.video);
   });
 
   // 用 let：Netflix 重新緩衝時會換掉 <video> 元素，屆時要把參照換成新元素
-  let video = videos[0];
+  let video = found[0].video;
+  // 影片所在的同網域 iframe（本文件裡的那一個）；null 表示影片就在本文件
+  const hostFrame = found[0].frame;
   const ctrl = makeController();
 
   // 有些網站用屬性禁止 PiP，這裡幫忙解除
@@ -73,9 +86,11 @@ function togglePip() {
     } catch (e) {}
   }
 
-  // 優先用 Document PiP（可放自訂控制列）；不支援時退回原生 PiP
+  // 優先用 Document PiP（可放自訂控制列）；不支援時退回原生 PiP。
+  // 影片在同網域 iframe 裡時，改把整個 iframe 搬進浮窗（見 openIframePip）。
   if (dpip && typeof dpip.requestWindow === "function") {
-    openDocumentPip(dpip).catch((err) => {
+    const opening = hostFrame ? openIframePip(dpip, hostFrame) : openDocumentPip(dpip);
+    opening.catch((err) => {
       console.warn("[PiP] Document PiP 失敗，改用原生：", err && err.message);
       nativePip();
     });
@@ -221,8 +236,8 @@ function togglePip() {
     video.style.cssText = VIDEO_CSS;
     wrap.appendChild(video);
 
-    // Netflix 等網站的字幕是疊在影片上的 HTML，搬走影片後會留在原頁面，這裡把它鏡射進浮窗
-    setupSubtitleMirror(pdoc, wrap, pipWindow);
+    // Netflix、friDay 影音等網站的字幕是疊在影片上的 HTML，搬走影片後會留在原頁面，這裡把它鏡射進浮窗
+    setupSubtitleMirror(pdoc, wrap, pipWindow, placeholder);
 
     // 控制列
     const bar = pdoc.createElement("div");
@@ -415,15 +430,147 @@ function togglePip() {
     }, { once: true });
   }
 
+  // ---- 同網域 iframe 支援 ----
+  // 收集本文件與巢狀同網域 iframe 裡的 <video>。frame 是影片所屬、位於本文件裡的那個 iframe
+  // （null＝影片就在本文件）；跨網域 iframe 讀不到內容，會由它自己那份注入腳本處理。
+  function collectVideos() {
+    const out = [];
+    const walk = (doc, frame, depth) => {
+      doc.querySelectorAll("video").forEach((v) => out.push({ video: v, frame }));
+      if (depth >= 3) return;
+      doc.querySelectorAll("iframe").forEach((f) => {
+        let d = null;
+        try { d = f.contentDocument; } catch (e) {}
+        if (d) walk(d, frame || f, depth + 1);
+      });
+    };
+    walk(document, null, 0);
+    return out;
+  }
+
+  // 找出目前有影片在原生子母畫面裡的文件（會往同網域 iframe 裡找）
+  function findNativePipDoc(doc, depth) {
+    const el = doc.pictureInPictureElement;
+    if (el && el.tagName === "VIDEO") return doc;
+    if (depth < 3) {
+      for (const f of doc.querySelectorAll("iframe")) {
+        let d = null;
+        try { d = f.contentDocument; } catch (e) {}
+        const r = d && findNativePipDoc(d, depth + 1);
+        if (r) return r;
+      }
+    }
+    // 瀏覽器可能把 iframe 裡的子母畫面元素回報成該 <iframe>，這種情況直接用本文件關
+    return el ? doc : null;
+  }
+
+  // 取得 iframe 內的主要影片：有多個時取長度最長的（避開廣告用的短影片），再看是否正在播
+  function frameVideo(frame) {
+    let d = null;
+    try { d = frame.contentDocument; } catch (e) {}
+    if (!d) return null;
+    const vs = Array.from(d.querySelectorAll("video"));
+    if (vs.length <= 1) return vs[0] || null;
+    const dur = (v) => (isFinite(v.duration) ? v.duration : 0);
+    vs.sort((a, b) => (dur(b) - dur(a)) || ((a.paused ? 1 : 0) - (b.paused ? 1 : 0)));
+    return vs[0];
+  }
+
+  // iframe 重新載入後，等網站播放器真的播起來，再把位置一次調回 t（差不多就不動）
+  function resumeAfterReload(frame, t) {
+    if (!(t > 5)) return;
+    const win = frame.ownerDocument.defaultView;
+    let tries = 0;
+    const timer = win.setInterval(() => {
+      tries++;
+      const v = frameVideo(frame);
+      const playing = v && v.readyState >= 3 && !v.paused && v.currentTime > 1;
+      if (playing && isFinite(v.duration) && v.duration > t + 5) {
+        if (Math.abs(v.currentTime - t) > 5) v.currentTime = t;
+        win.clearInterval(timer);
+      } else if (tries > 240) {
+        win.clearInterval(timer); // 等了 2 分鐘還沒播起來（廣告、驗證失敗等）就放棄
+      }
+    }, 500);
+  }
+
+  // ---- iframe 播放器版本 ----
+  // friDay 影音等網站把整個播放器放在同網域 iframe 裡。Document PiP 只能由最上層框架開啟，
+  // 而 <video> 一旦從 iframe 搬到別的文件就會被 Chrome 整個重置（MSE／DRM 串流中斷），
+  // 所以改成把整個 iframe 搬進浮窗：網站的播放器、字幕、控制列原封不動在浮窗裡運作。
+  // 代價是 iframe 搬移時會重新載入（關閉浮窗搬回去時也是），因此記住播放位置在重載後接續。
+  async function openIframePip(dpip, frame) {
+    const rect = frame.getBoundingClientRect();
+    const w0 = Math.round(rect.width) || 640;
+    const h0 = Math.round(rect.height) || 360;
+    const pipWindow = await dpip.requestWindow({ width: w0, height: h0 });
+    const pdoc = pipWindow.document;
+
+    const style = pdoc.createElement("style");
+    style.textContent = `
+      html,body{margin:0;height:100%;background:#000;overflow:hidden;}
+      iframe{display:block;width:100%!important;height:100%!important;border:0!important;margin:0!important;}
+    `;
+    pdoc.head.appendChild(style);
+
+    // 記住 iframe 原本的位置，關閉時放回去
+    const placeholder = document.createElement("span");
+    placeholder.style.display = "none";
+    frame.parentNode.insertBefore(placeholder, frame);
+
+    // 搬進浮窗重新載入後，播放器仍需能自動播放、使用 DRM、進全螢幕
+    const savedAllow = frame.getAttribute("allow");
+    const allow = new Set((savedAllow || "").split(";").map((s) => s.trim()).filter(Boolean));
+    ["autoplay", "encrypted-media", "fullscreen", "picture-in-picture"].forEach((t) => allow.add(t));
+    frame.setAttribute("allow", Array.from(allow).join("; "));
+
+    // 搬移會重新載入 iframe：先記住播放位置，載入後接續
+    let lastTime = video.currentTime;
+    pdoc.body.appendChild(frame);
+    resumeAfterReload(frame, lastTime);
+
+    // 持續記錄浮窗內的播放位置，關閉浮窗搬回原頁面時要用
+    const tracker = pipWindow.setInterval(() => {
+      const v = frameVideo(frame);
+      if (v && v.currentTime > 0) lastTime = v.currentTime;
+    }, 1000);
+
+    // 播放器對上層（現在是浮窗）發的 postMessage 轉給原頁面，
+    // 網站靠這個做的換集、播完處理等流程才會繼續運作
+    pipWindow.addEventListener("message", (e) => {
+      if (e.source !== frame.contentWindow) return;
+      try { window.postMessage(e.data, location.origin); } catch (err) {}
+    });
+
+    // 關閉子母畫面時，把 iframe 放回原位（會再重新載入一次）並接續播放位置
+    pipWindow.addEventListener("pagehide", () => {
+      pipWindow.clearInterval(tracker);
+      if (savedAllow === null) frame.removeAttribute("allow");
+      else frame.setAttribute("allow", savedAllow);
+      if (placeholder.parentNode) {
+        placeholder.parentNode.insertBefore(frame, placeholder);
+      }
+      placeholder.remove();
+      if (frame.ownerDocument === document) resumeAfterReload(frame, lastTime);
+    }, { once: true });
+  }
+
   // ---- 字幕鏡射 ----
-  // 有些網站的字幕不在影片串流裡，而是用 HTML 疊在 <video> 上（Netflix、YouTube 等）。
+  // 有些網站的字幕不在影片串流裡，而是用 HTML 疊在 <video> 上（Netflix、YouTube、friDay 影音等）。
   // 影片被搬進浮窗後，網站的播放器仍會持續更新原頁面上的字幕節點，
   // 所以只要監聽那個節點，把文字同步到浮窗裡的字幕層即可。
-  function setupSubtitleMirror(pdoc, wrap, pipWindow) {
+  // （瀏覽器原生繪製的 <track> 字幕會跟著 <video> 一起搬進浮窗，不需要另外處理。）
+  function setupSubtitleMirror(pdoc, wrap, pipWindow, anchor) {
     const SUB_SELECTORS = [
       ".player-timedtext",             // Netflix
       ".ytp-caption-window-container", // YouTube
+      ".vop-caption-container",        // VisualOn Player（friDay 影音等）：TTML 字幕畫在與影片同層的這個 div
+      "#TTMLRenderingDiv",             // VisualOn Player 同一個容器的 id（保險）
       ".shaka-text-container",         // Shaka Player（不少自架播放器）
+      ".vjs-text-track-display",       // Video.js
+      ".jw-captions",                  // JW Player
+      ".bmpui-ui-subtitle-overlay",    // Bitmovin Player
+      ".plyr__captions",               // Plyr
     ];
 
     const subs = pdoc.createElement("div");
@@ -433,7 +580,17 @@ function togglePip() {
     let observer = null;
     let source = null;
 
+    // 先從影片原本的位置（anchor 佔位節點）往上一層層找，優先抓同一個播放器裡的字幕容器，
+    // 避免頁面上有多個播放器時抓錯；佔位節點已被網站移除時退回整份文件搜尋
     const findSource = () => {
+      let node = anchor && anchor.parentNode;
+      while (node && node.nodeType === 1) {
+        for (const sel of SUB_SELECTORS) {
+          const el = node.matches(sel) ? node : node.querySelector(sel);
+          if (el) return el;
+        }
+        node = node.parentNode;
+      }
       for (const sel of SUB_SELECTORS) {
         const el = document.querySelector(sel);
         if (el) return el;

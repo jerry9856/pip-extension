@@ -9,6 +9,8 @@ function runTogglePip(tab) {
   chrome.scripting.executeScript(
     {
       target: { tabId: tab.id, allFrames: true },
+      // 在頁面主世界執行，才能取用 Netflix 等網站的內部播放器 API
+      world: "MAIN",
       func: togglePip
     },
     () => {
@@ -59,7 +61,9 @@ function togglePip() {
     return area(b) - area(a);
   });
 
-  const video = videos[0];
+  // 用 let：Netflix 重新緩衝時會換掉 <video> 元素，屆時要把參照換成新元素
+  let video = videos[0];
+  const ctrl = makeController();
 
   // 有些網站用屬性禁止 PiP，這裡幫忙解除
   if (video.disablePictureInPicture) {
@@ -71,16 +75,87 @@ function togglePip() {
 
   // 優先用 Document PiP（可放自訂控制列）；不支援時退回原生 PiP
   if (dpip && typeof dpip.requestWindow === "function") {
-    openDocumentPip(video, dpip).catch((err) => {
+    openDocumentPip(dpip).catch((err) => {
       console.warn("[PiP] Document PiP 失敗，改用原生：", err && err.message);
-      nativePip(video);
+      nativePip();
     });
   } else {
-    nativePip(video);
+    nativePip();
+  }
+
+  // ---- 播放控制抽象層 ----
+  // Netflix 的串流由它自己的播放器管理，直接操作 <video>（play()/currentTime）
+  // 在暫停較久或跳轉時會失效，必須改呼叫 Netflix 內部播放器 API；
+  // 其他網站則直接控制 <video>。
+  function makeController() {
+    const isNetflix = /(^|\.)netflix\.com$/.test(location.hostname);
+
+    // 取得 Netflix 內部播放器（非 Netflix 或取不到時回傳 null）
+    const nf = () => {
+      try {
+        const app =
+          window.netflix &&
+          window.netflix.appContext &&
+          window.netflix.appContext.state &&
+          window.netflix.appContext.state.playerApp;
+        const api = app && app.getAPI();
+        const vp = api && api.videoPlayer;
+        if (!vp) return null;
+        const ids = vp.getAllPlayerSessionIds() || [];
+        const id = ids.find((s) => String(s).indexOf("watch-") === 0) || ids[0];
+        return (id && vp.getVideoPlayerBySessionId(id)) || null;
+      } catch (e) {
+        return null;
+      }
+    };
+
+    return {
+      play() {
+        const p = nf();
+        if (p) {
+          try { p.play(); return; } catch (e) {}
+        }
+        video.play().catch(() => {});
+      },
+      pause() {
+        const p = nf();
+        if (p) {
+          try { p.pause(); return; } catch (e) {}
+        }
+        video.pause();
+      },
+      // 跳轉一律直接改 currentTime（Netflix API 的 seek() 每次都會觸發重新緩衝而卡住；
+      // 直接改 currentTime 在緩衝範圍內是瞬間完成）。跳出緩衝範圍造成的卡住，
+      // 由分段的復原機制處理：先試著恢復播放，還是卡就原地 seek 逼引擎重抓片段。
+      // 元素被 Netflix 換新的情況則由浮窗的接手監視器處理。
+      seekTo(sec) {
+        const wasPlaying = !video.paused;
+        video.currentTime = sec;
+        if (!isNetflix || !wasPlaying) return;
+        // 用影片目前所在視窗（浮窗）的計時器，原分頁在背景時計時器會被瀏覽器降速
+        const win = (video.ownerDocument && video.ownerDocument.defaultView) || window;
+        const stalled = () => video.paused || video.readyState < 3;
+        win.setTimeout(() => {
+          if (!stalled()) return;
+          const p = nf();
+          if (p) {
+            try { p.play(); } catch (e) {}
+          }
+          video.play().catch(() => {});
+        }, 1000);
+        win.setTimeout(() => {
+          if (!stalled()) return;
+          const p = nf();
+          if (p) {
+            try { p.seek(p.getCurrentTime()); p.play(); } catch (e) {}
+          }
+        }, 2500);
+      },
+    };
   }
 
   // ---- 自訂控制列版本（Document Picture-in-Picture）----
-  async function openDocumentPip(video, dpip) {
+  async function openDocumentPip(dpip) {
     const rect = video.getBoundingClientRect();
     const w0 = Math.round(rect.width) || video.videoWidth || 640;
     const h0 = Math.round(rect.height) || video.videoHeight || 360;
@@ -137,11 +212,13 @@ function togglePip() {
     wrap.className = "pip-wrap";
     pdoc.body.appendChild(wrap);
 
+    // 直接寫進 inline style，蓋掉原網站可能留下的固定寬高（否則拖曳邊角時影片不會跟著縮放）
+    const VIDEO_CSS =
+      "width:100%;height:100%;max-width:none;max-height:none;object-fit:contain;display:block;background:#000;";
+
     // 把影片搬進子母畫面，關掉自訂前的原生控制列（用我們自己的）
     video.controls = false;
-    // 直接寫進 inline style，蓋掉原網站可能留下的固定寬高（否則拖曳邊角時影片不會跟著縮放）
-    video.style.cssText =
-      "width:100%;height:100%;max-width:none;max-height:none;object-fit:contain;display:block;background:#000;";
+    video.style.cssText = VIDEO_CSS;
     wrap.appendChild(video);
 
     // Netflix 等網站的字幕是疊在影片上的 HTML，搬走影片後會留在原頁面，這裡把它鏡射進浮窗
@@ -234,45 +311,79 @@ function togglePip() {
       if (!seekable()) return;
       const t = (parseFloat(seek.value) / 1000) * video.duration;
       timeCur.textContent = fmt(t);
-      video.currentTime = t;
+      ctrl.seekTo(t);
     };
     seek.addEventListener("pointerdown", () => {
       dragging = true;
       wasPlaying = !video.paused;
-      if (wasPlaying) video.pause(); // 拖曳時暫停，畫面才會即時停在拖到的位置
+      if (wasPlaying) ctrl.pause(); // 拖曳時暫停，畫面才會即時停在拖到的位置
     });
     seek.addEventListener("input", seekToSlider);
     const endDrag = () => {
       seekToSlider();
       dragging = false;
-      if (wasPlaying) { wasPlaying = false; video.play().catch(() => {}); }
+      if (wasPlaying) { wasPlaying = false; ctrl.play(); }
     };
     seek.addEventListener("change", endDrag);
     seek.addEventListener("pointerup", endDrag);
     seek.addEventListener("pointercancel", endDrag);
-    video.addEventListener("timeupdate", syncSeek);
-    video.addEventListener("durationchange", syncSeek);
-    video.addEventListener("loadedmetadata", syncSeek);
     syncSeek();
 
     btnPlay.addEventListener("click", () => {
-      if (video.paused) video.play().catch(() => {});
-      else video.pause();
+      if (video.paused) ctrl.play();
+      else ctrl.pause();
     });
     btnBack.addEventListener("click", () => {
-      video.currentTime = Math.max(0, video.currentTime - 10);
+      ctrl.seekTo(Math.max(0, video.currentTime - 10));
     });
     btnFwd.addEventListener("click", () => {
       const end = isFinite(video.duration) ? video.duration : Number.MAX_SAFE_INTEGER;
-      video.currentTime = Math.min(end, video.currentTime + 10);
+      ctrl.seekTo(Math.min(end, video.currentTime + 10));
     });
     speed.addEventListener("change", () => {
       video.playbackRate = parseFloat(speed.value);
     });
 
-    video.addEventListener("play", syncPlayIcon);
-    video.addEventListener("pause", syncPlayIcon);
-    video.addEventListener("ratechange", () => { speed.value = String(video.playbackRate); });
+    // 集中綁定影片事件，元素被 Netflix 換新接手後要重綁一次
+    const onRate = () => { speed.value = String(video.playbackRate); };
+    const bindVideo = () => {
+      video.addEventListener("timeupdate", syncSeek);
+      video.addEventListener("durationchange", syncSeek);
+      video.addEventListener("loadedmetadata", syncSeek);
+      video.addEventListener("play", syncPlayIcon);
+      video.addEventListener("pause", syncPlayIcon);
+      video.addEventListener("ratechange", onRate);
+    };
+    bindVideo();
+
+    // ---- Netflix 影片元素接手 ----
+    // Netflix 跳轉到緩衝範圍外（或自動播下一集）時，播放器可能把 <video>
+    // 換成新元素放回原頁面，浮窗就會停在死掉的舊畫面。定期檢查原頁面，
+    // 一出現影片元素就接手搬進浮窗、重綁控制列。
+    const adoptVideo = (nv) => {
+      nv.controls = false;
+      nv.style.cssText = VIDEO_CSS;
+      if (nv !== video) {
+        if (video.parentNode === wrap) video.remove();
+        video = nv;
+        video.playbackRate = parseFloat(speed.value) || 1;
+        bindVideo();
+      }
+      if (video.parentNode !== wrap) wrap.insertBefore(video, wrap.firstChild);
+      syncPlayIcon();
+      syncSeek();
+    };
+    let adoptTimer = null;
+    if (/(^|\.)netflix\.com$/.test(location.hostname)) {
+      adoptTimer = pipWindow.setInterval(() => {
+        // 影片被我們搬走後，原頁面查得到 <video> 就代表 Netflix 換了新元素
+        // （或把原本那顆搬回去了），兩種情況都重新接手。
+        // 換新元素只在目前影片確實卡住時才接手，避免頁面上還有其他影片
+        // （例如瀏覽頁的預告片）時誤抓
+        const nv = document.querySelector("video");
+        if (nv && (nv === video || video.readyState < 3)) adoptVideo(nv);
+      }, 500);
+    }
 
     // 游標移到子母畫面上才顯示控制列，靜止 2.5 秒後自動隱藏
     let hideTimer;
@@ -294,6 +405,7 @@ function togglePip() {
 
     // 關閉子母畫面時，把影片放回原位並還原狀態
     pipWindow.addEventListener("pagehide", () => {
+      if (adoptTimer) pipWindow.clearInterval(adoptTimer);
       video.controls = savedControls;
       video.style.cssText = savedCss;
       if (placeholder.parentNode) {
@@ -365,22 +477,22 @@ function togglePip() {
 
   // ---- 原生 PiP 版本（退回方案）----
   // 原生子母畫面視窗不支援自訂 UI／變速，但至少提供 播放/暫停 與 快轉/倒退
-  function nativePip(video) {
+  function nativePip() {
     const enter = () => {
       video.requestPictureInPicture().then(() => {
         try {
           const ms = navigator.mediaSession;
           if (!ms) return;
-          ms.setActionHandler("play", () => video.play().catch(() => {}));
-          ms.setActionHandler("pause", () => video.pause());
+          ms.setActionHandler("play", () => ctrl.play());
+          ms.setActionHandler("pause", () => ctrl.pause());
           ms.setActionHandler("seekbackward", (d) => {
             const off = (d && d.seekOffset) || 10;
-            video.currentTime = Math.max(0, video.currentTime - off);
+            ctrl.seekTo(Math.max(0, video.currentTime - off));
           });
           ms.setActionHandler("seekforward", (d) => {
             const off = (d && d.seekOffset) || 10;
             const end = isFinite(video.duration) ? video.duration : Number.MAX_SAFE_INTEGER;
-            video.currentTime = Math.min(end, video.currentTime + off);
+            ctrl.seekTo(Math.min(end, video.currentTime + off));
           });
         } catch (e) {}
       }).catch((err) => {

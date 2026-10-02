@@ -4,6 +4,11 @@
 
 格式參考 [Keep a Changelog](https://keepachangelog.com/zh-TW/1.1.0/)，並遵循[語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [1.4.1] - 2026-10-02
+
+### 修正
+- 修正子母畫面中自動播放下一部影片後，影片被裁切（浮窗拉大正常、縮小就被切掉）的問題。網站播放器換下一部時會把原頁面播放器的固定 px 寬高與定位寫進 `<video>` 的 inline style，蓋掉浮窗設定的 100% 尺寸；改由浮窗樣式表以 `!important` 鎖定影片（與 iframe 模式的 iframe）尺寸，網站寫的 inline style 不再影響版面。
+
 ## [1.4.0] - 2026-09-22
 
 ### 新增

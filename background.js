@@ -191,7 +191,13 @@ function togglePip() {
       html,body{margin:0;height:100%;background:#000;overflow:hidden;
         font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif;}
       .pip-wrap{position:relative;width:100%;height:100%;background:#000;}
-      .pip-wrap video{width:100%;height:100%;object-fit:contain;background:#000;}
+      /* 網站播放器（YouTube、Netflix 等）換下一部影片時，常會把原頁面播放器的固定 px 寬高、
+         定位寫進 <video> 的 inline style，蓋掉我們的 100% 而讓浮窗縮小時影片被裁切。
+         樣式表的 !important 優先於網站寫的 inline style，所以尺寸一律在這裡鎖住。 */
+      .pip-wrap video{width:100%!important;height:100%!important;
+        min-width:0!important;min-height:0!important;max-width:none!important;max-height:none!important;
+        position:static!important;inset:auto!important;margin:0!important;transform:none!important;
+        object-fit:contain!important;display:block!important;background:#000;}
       .pip-bar{position:absolute;left:0;right:0;bottom:0;display:flex;flex-direction:column;
         gap:8px;padding:10px 12px;
         background:linear-gradient(to top, rgba(0,0,0,.78), rgba(0,0,0,0));
@@ -509,7 +515,9 @@ function togglePip() {
     const style = pdoc.createElement("style");
     style.textContent = `
       html,body{margin:0;height:100%;background:#000;overflow:hidden;}
-      iframe{display:block;width:100%!important;height:100%!important;border:0!important;margin:0!important;}
+      iframe{display:block!important;width:100%!important;height:100%!important;border:0!important;margin:0!important;
+        min-width:0!important;min-height:0!important;max-width:none!important;max-height:none!important;
+        position:static!important;inset:auto!important;transform:none!important;}
     `;
     pdoc.head.appendChild(style);
 

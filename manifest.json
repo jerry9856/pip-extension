@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "子母畫面播放器 (Picture-in-Picture)",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "點一下圖示，即可把目前頁面的影片用子母畫面 (PiP) 浮窗播放。",
   "permissions": ["activeTab", "scripting"],
   "host_permissions": ["<all_urls>"],
